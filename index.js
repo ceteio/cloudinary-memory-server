@@ -22,7 +22,7 @@ var logger = new (winston.Logger)({
       timestamp: true
     })
   ],
-  level: 'debug',
+  level: 'silly',
   exitOnError: false,
   expressFormat: true,
   colorize: true
@@ -124,7 +124,7 @@ app.post('/:api_version/:cloudname/image/upload', function (req, res, next) {
   form.uploadDir = uploadDir
 
   form.on('progress', function (recv, total) {
-    logger.debug('received: %s % (%s / %s bytes)', Number(recv / total * 100).toFixed(2), recv, total)
+    logger.silly('received: %s % (%s / %s bytes)', Number(recv / total * 100).toFixed(2), recv, total)
   })
 
   form.on('error', function (err) {
@@ -254,4 +254,6 @@ app.delete('/:api_version/:cloudname/resources/image/upload', function (req, res
 //   return res.status(200).send()
 // })
 
-require('make-runnable')
+require('make-runnable/custom')({
+  printOutputFrame: false
+})
