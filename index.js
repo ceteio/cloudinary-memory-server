@@ -1,259 +1,222 @@
-var blocked = require('blocked')
-var bodyParser = require('body-parser')
-var express = require('express')
-var expressWinston = require('express-winston')
-var fileType = require('file-type')
-var formidable = require('formidable')
-var fs = require('fs-extra')
-var http = require('http')
-var https = require('https')
-var imageSize = require('image-size')
-var randomstring = require("randomstring")
-var winston = require('winston')
+const bodyParser = require("body-parser");
+const express = require("express");
+const expressWinston = require("express-winston");
+const fileType = require("file-type");
+const fileUpload = require("express-fileupload");
+const https = require("https");
+const imageSize = require("image-size");
+const randomstring = require("randomstring");
+const winston = require("winston");
+const fs = require("fs");
+const path = require("path");
+const execa = require("execa");
+const tmp = require("tmp");
 
-blocked(function (ms) {
-  logger.warn('blocked for %sms', ms | 0)
-})
+// Ensure temp directories are cleaned up on process exit
+tmp.setGracefulCleanup();
 
-var logger = new (winston.Logger)({
-  transports: [
-    new winston.transports.Console({
-      colorize: true,
-      timestamp: true
-    })
-  ],
-  level: 'silly',
-  exitOnError: false,
-  expressFormat: true,
-  colorize: true
-})
+module.exports = function({
+  port = process.env.HTTPS_PORT || 9443,
+  host = process.env.UPLOAD_HOST || "https://localhost:" + port,
+  sslKeyFile = process.env.SSL_KEY_FILE,
+  sslCertFile = process.env.SSL_CERT_FILE,
+  logLevel = process.env.LOG_LEVEL || "info"
+} = {}) {
+  const files = new Map();
+  const app = express();
 
-var HTTP_PORT = process.env.HTTP_PORT || 9080
-var HTTPS_PORT = process.env.HTTPS_PORT || 9443
+  const logger = new winston.Logger({
+    transports: [
+      new winston.transports.Console({
+        colorize: true,
+        timestamp: true
+      })
+    ],
+    level: logLevel,
+    exitOnError: false,
+    expressFormat: true,
+    colorize: true
+  });
 
-var UPLOAD_HOST = process.env.UPLOAD_HOST || 'http://0.0.0.0:' + HTTP_PORT
-var UPLOAD_DIR = process.env.UPLOAD_DIR || '/upload'
+  if (!sslKeyFile || !sslCertFile) {
+    logger.info(
+      `Using temporary SSL certificate for the life of this process. To avoid browser warnings, see README.md for instructions on installing a trusted localhost certificate.`
+    );
 
-var PUBLIC_ID_DIR = process.env.PUBLIC_ID_DIR || '/public_id'
-
-var options = {
-  key: fs.readFileSync('/ssl/key.pem'),
-  cert: fs.readFileSync('/ssl/cert.pem'),
-}
-
-var app = express()
-
-module.exports = {
-  app, 
-  start: function() {
-    http.createServer(app).listen(HTTP_PORT, function() {
-      logger.info('Http server listening on port %s...', HTTP_PORT)
-    })
-    https.createServer(options, app).listen(HTTPS_PORT, function() {
-      logger.info('Https server listening on port %s...', HTTPS_PORT)
-    })
-  }
-}
-
-app.use(express.static(UPLOAD_DIR))
-
-app.use(bodyParser.urlencoded({
-  extended: false
-}))
-
-app.use(bodyParser.json())
-
-app.use(expressWinston.logger({
-  transports: [
-    new winston.transports.Console({
-      colorize: true,
-      timestamp: true
-    })
-  ],
-  level: 'info',
-  exitOnError: false,
-  expressFormat: true,
-  colorize: true
-}))
-
-app.get('/:cloudname/image/upload/:public_id', function (req, res, next) {
-
-  var cloudname = req.params.cloudname
-  var public_id = req.params.public_id
-  var publicIdPath = [PUBLIC_ID_DIR, cloudname, public_id].join('/')
-  logger.debug('publicIdPath:', publicIdPath)
-
-  if(!fs.existsSync(publicIdPath)) {
-    return res.status(404).end()
+    // Generating SSL certs
+    const tmpobj = tmp.dirSync();
+    const keyTmpPem = path.join(tmpobj.name, "keytmp.pem");
+    sslCertFile = path.join(tmpobj.name, "cert.pem");
+    sslKeyFile = path.join(tmpobj.name, "key.pem");
+    execa.sync("openssl", [
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-keyout",
+      keyTmpPem,
+      "-out",
+      sslCertFile,
+      "-days",
+      "365",
+      "-nodes",
+      "-batch"
+    ]);
+    execa.sync("openssl", ["rsa", "-in", keyTmpPem, "-out", sslKeyFile]);
   }
 
-  var uploadPath = fs.readFileSync(publicIdPath, 'utf8')
-  logger.debug('uploadPath:', uploadPath)
+  const options = {
+    key: fs.readFileSync(path.resolve(sslKeyFile)),
+    cert: fs.readFileSync(path.resolve(sslCertFile))
+  };
 
-  if(!fs.existsSync(uploadPath)) {
-    return res.status(404).end()
-  }
+  app.use(
+    bodyParser.urlencoded({
+      extended: false
+    })
+  );
 
-  return res.status(200).sendFile(uploadPath)
-})
+  app.use(bodyParser.json());
 
-app.post('/:api_version/:cloudname/image/upload', function (req, res, next) {
+  app.use(fileUpload());
 
-  var public_id = randomstring.generate(20)
-  logger.debug('public_id:', public_id)
+  function getter(req, res) {
+    const cloudname = req.params.cloudname;
+    // may have an optional file extension
+    const public_id = req.params.public_id.split(".")[0];
+    const publicIdPath = [cloudname, public_id].join("/");
+    logger.debug("publicIdPath:", publicIdPath);
 
-  var version = randomstring.generate({ length: 10, charset: 'numeric' })
-  logger.debug('version:', version)
-
-  var cloudname = req.params.cloudname
-  logger.debug('cloudname:', cloudname)
-
-  var uploadDir = [UPLOAD_DIR, cloudname, 'image/upload', 'v' + version].join('/')
-  logger.debug('uploadDir: ', uploadDir)
-  fs.ensureDirSync(uploadDir)
-
-  var form = new formidable.IncomingForm()
-
-  form.encoding = 'utf-8'
-  form.hash = 'md5'
-  form.keepExtensions = true
-  form.maxFields = 1000
-  form.maxFieldsSize = 1024 * 1024 * 2 // 2 MB
-  form.multiples = false
-  form.type = 'multipart'
-  form.uploadDir = uploadDir
-
-  form.on('progress', function (recv, total) {
-    logger.silly('received: %s % (%s / %s bytes)', Number(recv / total * 100).toFixed(2), recv, total)
-  })
-
-  form.on('error', function (err) {
-    next(err)
-  })
-
-  form.on('aborted', function (name, file) {
-    logger.warn('aborted: name="%s", path="%s", type="%s", size=%s bytes', file.name, file.path, file.type, file.size)
-    res.status(308).end()
-  })
-
-  form.parse(req, function (err, fields, files) {
-
-    if (err) {
-      return next(err)
+    if (!files.has(publicIdPath)) {
+      return res.status(404).end();
     }
 
-    var file = files.file
-    logger.info('file: name="%s", path="%s", type="%s", size=%s bytes, hash="%s", lastModifiedDate="%s"',
-      file.name, file.path, file.type, file.size, file.hash, file.lastModifiedDate)
+    const { data, mime } = files.get(publicIdPath);
 
-    var fileTypeInfo = fileType(fs.readFileSync(file.path))
-    logger.info('fileTypeInfo:', fileTypeInfo)
-
-    var name = [public_id, fileTypeInfo.ext].join('.')
-    logger.debug('name:', name)
-
-    imageSize(file.path, function (err, dimensions) {
-
-      var newPath = [cloudname, 'image/upload', 'v' + version, public_id].join('/')
-      var url = [UPLOAD_HOST, newPath].join('/')
-
-      newPath = [UPLOAD_DIR, newPath].join('/')
-      fs.renameSync(file.path, newPath)
-
-      var publicIdPath = [PUBLIC_ID_DIR, cloudname].join('/')
-      fs.ensureDirSync(publicIdPath)
-
-      publicIdPath = [publicIdPath, public_id].join('/')
-      logger.info('publicIdPath: ', publicIdPath)
-
-      fs.writeFileSync(publicIdPath, newPath)
-
-      var jsonResponse = {
-        public_id: public_id,
-        version: version,
-        signature: randomstring.generate(40),
-        width: dimensions.width,
-        height: dimensions.height,
-        format: fileTypeInfo.ext, 
-        resource_type: fileTypeInfo.mime.split('/')[0],
-        original_filename: file.path,
-        url: url,
-        secure_url: url,
-        bytes: file.size,
-        etag: file.hash,
-        created_at: file.lastModifiedDate.toISOString(),
-        placeholder: false,
-        type: 'upload'
-      }
-
-      logger.info('jsonResponse: ', jsonResponse)
-
-      return res.status(200).send(jsonResponse)
-
-    })
-
-  })
-
-})
-
-app.delete('/:api_version/:cloudname/resources/image/upload', function (req, res, next) {
-
-  var cloudname = req.params.cloudname
-  logger.debug('cloudname:', cloudname)
-
-  var public_ids = req.body['public_ids[]']
-  logger.info('public_ids: ', public_ids)
-
-  if(typeof(public_ids) === 'string') {
-    public_ids = [public_ids]
+    res.type(mime);
+    res.status(200);
+    return res.send(data);
   }
 
-  var jsonResponse = {
-    partial: null,
-    rate_limit_allowed: null,
-    rate_limit_reset_at: null,
-    rate_limit_remaining: null
-  }
+  app.get("/:cloudname/image/upload/:transform/:public_id", getter);
+  app.get("/:cloudname/image/upload/:public_id", getter);
 
-  public_ids.forEach(function(public_id) {
-
-    try {
-
-      logger.debug('public_id:', public_id)
-
-      var publicIdPath = [PUBLIC_ID_DIR, cloudname, public_id].join('/')
-      logger.debug('publicIdPath:', publicIdPath)
-
-      if(!fs.existsSync(publicIdPath)) {
-        return jsonResponse[public_id] = 'not_found'
-      }
-
-      var uploadPath = fs.readFileSync(publicIdPath, 'utf8')
-      logger.debug('uploadPath:', uploadPath)
-
-      fs.unlinkSync(publicIdPath)
-
-      if(!fs.existsSync(uploadPath)) {
-        return jsonResponse[public_id] = 'not_found'
-      }
-
-      fs.unlinkSync(uploadPath)
-
-      jsonResponse[public_id] = 'deleted'
-
-    } catch(err) {
-      jsonResponse[public_id] = 'error'
+  app.post("/:api_version/:cloudname/image/upload", function(req, res) {
+    if (!req.files || !req.files.file) {
+      return res.status(400).send("No files were uploaded.");
     }
 
-  })
+    const public_id = randomstring.generate(20);
+    logger.debug("public_id:", public_id);
 
-  return res.status(200).send(jsonResponse)
-})
+    const version = randomstring.generate({ length: 10, charset: "numeric" });
+    logger.debug("version:", version);
 
-// app.all('*', function (req, res, next) {
-//   return res.status(200).send()
-// })
+    const cloudname = req.params.cloudname;
+    logger.debug("cloudname:", cloudname);
 
-require('make-runnable/custom')({
-  printOutputFrame: false
-})
+    const file = req.files.file;
+    logger.info('incoming file: size=%s bytes, md5="%s"', file.size, file.md5);
+
+    const fileTypeInfo = fileType(file.data);
+    logger.debug("fileTypeInfo:", fileTypeInfo);
+
+    const dimensions = imageSize(file.data);
+
+    const url = [
+      host,
+      cloudname,
+      "image",
+      "upload",
+      "v" + version,
+      public_id
+    ].join("/");
+
+    const meta = {
+      public_id: public_id,
+      version: version,
+      signature: randomstring.generate(40),
+      width: dimensions.width,
+      height: dimensions.height,
+      format: fileTypeInfo.ext,
+      resource_type: fileTypeInfo.mime.split("/")[0],
+      original_filename: file.name,
+      url: url,
+      secure_url: url,
+      bytes: file.size,
+      etag: file.md5,
+      created_at: new Date().toISOString(),
+      placeholder: false,
+      type: "upload"
+    };
+
+    // File was successfully uploaded and dimension information parsed: save
+    // the data for later retrieval
+    const publicIdPath = [cloudname, public_id].join("/");
+    logger.debug("publicIdPath: ", publicIdPath);
+    files.set(publicIdPath, { data: file.data, mime: fileTypeInfo.mime });
+
+    logger.info("file uploaded and accessible via: ", url);
+
+    return res.status(200).send(meta);
+  });
+
+  app.delete("/:api_version/:cloudname/resources/image/upload", function(
+    req,
+    res
+  ) {
+    const cloudname = req.params.cloudname;
+    logger.debug("cloudname:", cloudname);
+
+    const public_ids = req.body["public_ids[]"];
+    logger.debug("public_ids: ", public_ids);
+
+    if (typeof public_ids === "string") {
+      public_ids = [public_ids];
+    }
+
+    const jsonResponse = {
+      partial: null,
+      rate_limit_allowed: null,
+      rate_limit_reset_at: null,
+      rate_limit_remaining: null
+    };
+
+    public_ids.forEach(function(public_id) {
+      try {
+        logger.debug("public_id:", public_id);
+
+        const publicIdPath = [cloudname, public_id].join("/");
+        logger.debug("publicIdPath:", publicIdPath);
+
+        if (!files.has(publicIdPath)) {
+          return (jsonResponse[public_id] = "not_found");
+        }
+
+        files.delete(publicIdPath);
+
+        jsonResponse[public_id] = "deleted";
+      } catch (err) {
+        jsonResponse[public_id] = "error";
+      }
+    });
+
+    return res.status(200).send(jsonResponse);
+  });
+
+  app.use(
+    expressWinston.errorLogger({
+      winstonInstance: logger,
+      exitOnError: false,
+      expressFormat: true,
+      colorize: true
+    })
+  );
+
+  return new Promise(resolve => {
+    https.createServer(options, app).listen(port, function() {
+      logger.info(`Cloudinary Memory Server ready on ${host}`);
+      resolve({ app, host, port });
+    });
+  });
+};
