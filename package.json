@@ -1,7 +1,7 @@
 {
   "name": "@ceteio/cloudinary-memory-server",
   "description": "An in-memory mock server compatible with Cloudinary SDK methods for uploading and retrieving files.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": false,
   "main": "index.js",
   "bin": "./cli.js",
