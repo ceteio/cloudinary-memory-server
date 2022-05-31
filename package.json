@@ -1,7 +1,8 @@
 {
   "name": "@ceteio/cloudinary-memory-server",
   "description": "An in-memory mock server compatible with Cloudinary SDK methods for uploading and retrieving files.",
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "private": false,
   "main": "index.js",
   "bin": "./cli.js",
   "author": "Jess Telford <jess+github@cete.io>",
@@ -37,5 +38,9 @@
     "randomstring": "^1.1.5",
     "tmp": "^0.2.1",
     "winston": "^2.3.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }
