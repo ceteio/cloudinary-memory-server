@@ -218,9 +218,9 @@ module.exports = function({
   );
 
   return new Promise(resolve => {
-    https.createServer(options, app).listen(port, function() {
+    const server = https.createServer(options, app).listen(port, function() {
       logger.info(`Cloudinary Memory Server ready on ${host}`);
-      resolve({ app, host, port });
+      resolve({ app, server, host, port });
     });
   });
 };
