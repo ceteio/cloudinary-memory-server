@@ -204,6 +204,10 @@ module.exports = function({
     return res.status(200).send(jsonResponse);
   });
 
+  app.get("/ping", function(req, res) {
+    return res.status(200).end();
+  });
+
   app.use(
     expressWinston.errorLogger({
       winstonInstance: logger,
